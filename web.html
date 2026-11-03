@@ -1,0 +1,23 @@
+<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MAY OS 13G · Prueba</title>
+<style>body{font-family:system-ui;max-width:640px;margin:auto;padding:12px;background:#140c1c;color:#f5e9ff}
+#log{min-height:300px;border:1px solid #6b3a8a;border-radius:10px;padding:8px;overflow-y:auto;max-height:60vh}
+.u{text-align:right;color:#ffd0e8}.b{color:#cfe8ff}.e{font-size:.85em;opacity:.8}select,input,button{font-size:1em;padding:6px;border-radius:8px}
+form{display:flex;gap:6px;margin-top:8px}input{flex:1}</style></head><body>
+<h2>🎙️ MAY OS 13G · Habla con tu compañía IA</h2>
+<label>Compañía: <select id="persona"></select></label> <label>Idioma: <select id="idioma"></select></label>
+<div id="log"></div>
+<form id="f"><input id="m" maxlength="1000" placeholder="Escribe tu mensaje…" required><button>Enviar</button></form>
+<p class="e">IA: emociones simuladas. No da consejos médicos, legales ni financieros. En crisis: 112 · 024 · 016. Creado por Pedro Sánchez Gómez (Mar Menor) con Copilot y Grok.</p>
+<script>
+const $=id=>document.getElementById(id),log=$('log');
+const sid=()=>{let k='sid_'+$('persona').value,v=localStorage.getItem(k);if(!v){v=crypto.randomUUID().replace(/-/g,'');localStorage.setItem(k,v)}return v};
+fetch('api/personas').then(r=>r.json()).then(p=>{for(const k in p)$('persona').add(new Option(p[k].nombre,k))});
+fetch('api/idiomas').then(r=>r.json()).then(p=>{for(const k in p)$('idioma').add(new Option(p[k],k))});
+function add(c,t){const d=document.createElement('div');d.className=c;d.textContent=t;log.appendChild(d);log.scrollTop=1e9;return d}
+$('f').onsubmit=async e=>{e.preventDefault();const m=$('m').value;$('m').value='';add('u',m);const w=add('b','…');
+ try{const r=await fetch('api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:m,session_id:sid(),persona:$('persona').value,idioma:$('idioma').value})});
+ const j=await r.json();if(!r.ok)throw new Error(j.detail||r.status);
+ w.textContent=j.response_text;add('e',`${j.emotion.emoji} ${j.emotion.label} · intensidad ${j.emotion.intensity} (emoción simulada)`);
+ const a=new Audio(j.audio_url.replace(/^\//,''));a.controls=true;log.appendChild(a);a.play().catch(()=>{})}catch(x){w.textContent='⚠️ '+x.message}};
+</script></body></html>
