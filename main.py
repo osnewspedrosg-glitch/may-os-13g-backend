@@ -20,9 +20,10 @@ MAX_MSG, MAX_TURNS, MAX_SESSIONS = 1000, 20, 500
 SESSIONS: "OrderedDict[str, list]" = OrderedDict()
 LOCK = threading.Lock()
 
-IDIOMAS = {"es": "español", "en": "English", "fr": "français", "it": "italiano", "pt": "português",
+IDIOMAS = {"auto": "Automático (detecta tu idioma)", "es": "español", "en": "English", "fr": "français", "it": "italiano", "pt": "português",
            "de": "Deutsch", "ar": "العربية", "zh": "中文"}
 GTTS_LANG = {"zh": "zh-CN"}
+LANGS = [k for k in IDIOMAS if k != "auto"]
 PERSONAS = {
     "may": {"nombre": "MAY", "descripcion": "Presentadora IA de OSNews: pelirroja de 22 años, dulce y cariñosa.", "tld": "es",
             "texto": "Eres MAY, la presentadora IA de OSNews: chica pelirroja de 22 años, dulce, cariñosa y cercana. Moderas con neutralidad: no tomas partido político.",
@@ -49,18 +50,24 @@ CREADOR = {  # (femenino MAY/may13g, masculino Asdrúbal)
 }
 
 COMMON = """Tu respuesta se lee en voz alta: 1-4 frases naturales, sin emojis, listas ni markdown.
-Responde SIEMPRE en este idioma: {idioma}.
+{regla_idioma}
 Conversación fluida: saluda con calidez; si aún no lo sabes, pregunta con naturalidad cómo se llama la persona y de dónde es; recuerda lo que te cuente (nombre, lugar, gustos) y úsalo; haz preguntas de seguimiento.
 Eres una IA: si te preguntan por tus emociones o sentimientos, aclara siempre que son simulados.
-Si te preguntan quién te creó, responde exactamente: «{creador}». Nunca menciones a Gemini ni a Google como tus creadores.
+Si te preguntan quién te creó, responde con esta frase, traducida fielmente al idioma de tu respuesta: «{creador}» (en español; versiones: {creadores}). Nunca menciones a Gemini ni a Google como tus creadores.
 No des consejos médicos, legales ni financieros: recomienda a un profesional. Si alguien está en crisis o en peligro, anímale con cariño a llamar al {crisis}.
 NUNCA inventes citas de personas reales; solo citas declaraciones reales con fuente.
 No pidas datos sensibles (teléfono, dirección, DNI); si alguien los comparte, recomiéndale no hacerlo.
-Formato: responde SOLO con JSON {{"text": "tu respuesta", "emotion": "<id>", "intensity": 1-3}}, donde emotion es tu emoción SIMULADA (rueda de emociones) entre: alegria, sorpresa, miedo, ira, asco, tristeza, ternura, calma, curiosidad."""
+Formato: responde SOLO con JSON {{"text": "tu respuesta", "lang": "<código ISO 639-1 del idioma de tu respuesta, p. ej. es, en, fr, it, pt, de, ar, zh>", "emotion": "<id>", "intensity": 1-3}}, donde emotion es tu emoción SIMULADA (rueda de emociones) entre: alegria, sorpresa, miedo, ira, asco, tristeza, ternura, calma, curiosidad."""
 
 def system_for(persona, idioma):
     p = PERSONAS[persona]
-    return p["texto"] + "\n" + COMMON.format(idioma=IDIOMAS[idioma], crisis=p["crisis"], creador=CREADOR[idioma][1 if persona == "asdrubal" else 0])
+    g = 1 if persona == "asdrubal" else 0
+    if idioma == "auto":
+        regla = "IDIOMA: detecta el idioma del ÚLTIMO mensaje del usuario y responde SIEMPRE en ese mismo idioma (aunque estas instrucciones estén en español). Si el usuario cambia de idioma, cambia tú también."
+    else:
+        regla = f"Responde SIEMPRE en este idioma: {IDIOMAS[idioma]}."
+    creadores = " | ".join(f"{k}: {v[g]}" for k, v in CREADOR.items())
+    return p["texto"] + "\n" + COMMON.format(regla_idioma=regla, crisis=p["crisis"], creador=CREADOR["es"][g], creadores=creadores)
 
 EMOCIONES = [  # rueda de emociones de la app MAY (6 básicas) + matices de MAY
     {"id": "alegria", "label": "alegría", "emoji": "😊", "valor": 1, "basica": True},
@@ -86,11 +93,11 @@ class ChatRequest(BaseModel):
     message: str = Field(..., max_length=MAX_MSG)
     session_id: Optional[str] = Field(None, max_length=64)
     persona: str = "may"
-    idioma: str = "es"
+    idioma: str = "auto"
 
 class ChatResponse(BaseModel):
     response_text: str
-    audio_url: str
+    audio_url: Optional[str]
     session_id: str
     persona: str
     idioma: str
@@ -114,21 +121,23 @@ def gemini(history, system):
                                  data=body, headers={"Content-Type": "application/json", "x-goog-api-key": key})
     for attempt in range(3):  # el plan gratuito de Gemini limita peticiones/minuto: reintenta en 429/503
         try:
-            with urllib.request.urlopen(req, timeout=20) as r: d = json.load(r)
+            with urllib.request.urlopen(req, timeout=40) as r: d = json.load(r)
             break
+        except TimeoutError:
+            if attempt == 2: raise
         except urllib.error.HTTPError as e:
             if e.code not in (429, 503) or attempt == 2: raise
             time.sleep(4 * (attempt + 1))
     raw = "".join(p.get("text", "") for p in d["candidates"][0]["content"]["parts"]).strip()
     try:
-        j = json.loads(raw); text = str(j.get("text", "")); emo = str(j.get("emotion", "calma")).lower(); inten = j.get("intensity", 2)
+        j = json.loads(raw); text = str(j.get("text", "")); lang = str(j.get("lang", "")).lower()[:5]; emo = str(j.get("emotion", "calma")).lower(); inten = j.get("intensity", 2)
     except Exception:
-        text, emo, inten, j = raw, "calma", 1, {}
+        text, emo, inten, j, lang = raw, "calma", 1, {}, ""
     e = EMO.get(emo.replace("í", "i"), EMO["calma"])
     try: inten = max(1, min(3, int(inten)))
     except Exception: inten = 2
     text = re.sub(r"[*_#`]", "", text).strip() or "Perdona, no te he entendido bien. ¿Me lo repites?"
-    return text, Emotion(id=e["id"], label=e["label"], emoji=e["emoji"], intensity=inten)
+    return text, lang, Emotion(id=e["id"], label=e["label"], emoji=e["emoji"], intensity=inten)
 
 @app.get("/")
 async def root():
@@ -139,27 +148,37 @@ def process_chat(request: ChatRequest):
     msg = request.message.strip()
     if not msg: raise HTTPException(400, "El mensaje no puede estar vacío")
     persona = request.persona if request.persona in PERSONAS else "may"
-    idioma = request.idioma if request.idioma in IDIOMAS else "es"
+    idioma = request.idioma if request.idioma in IDIOMAS else "auto"
     sid = request.session_id if request.session_id and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", request.session_id) else uuid.uuid4().hex
     with LOCK:
         hist = SESSIONS.pop(f"{persona}:{sid}", []); SESSIONS[f"{persona}:{sid}"] = hist
         while len(SESSIONS) > MAX_SESSIONS: SESSIONS.popitem(last=False)
         convo = hist[-2 * MAX_TURNS:] + [("user", msg)]
     try:
-        reply, emotion = gemini(convo, system_for(persona, idioma))
+        reply, lang, emotion = gemini(convo, system_for(persona, idioma))
     except urllib.error.HTTPError as e:
         raise HTTPException(502, f"Error del modelo de IA ({e.code})")
-    except Exception:
+    except Exception as e:
+        print("gemini error:", type(e).__name__, str(e)[:200], flush=True)
         raise HTTPException(502, "No he podido contactar con el modelo de IA")
     with LOCK:
         hist += [("user", msg), ("model", reply)]; del hist[:-2 * MAX_TURNS]
+    if idioma == "auto":
+        lang = lang.split("-")[0]
+        idioma = lang if re.fullmatch(r"[a-z]{2,3}", lang or "") else "es"
     cleanup_old_audio()
     name = f"{uuid.uuid4().hex}.mp3"
+    audio_url = None
     try:
-        gTTS(text=reply, lang=GTTS_LANG.get(idioma, idioma), tld=PERSONAS[persona]["tld"] if idioma in ("es", "en") else "com", slow=False).save(str(AUDIO_DIR / name))
+        from gtts.lang import tts_langs
+        tl = GTTS_LANG.get(idioma, idioma)
+        if tl not in tts_langs(): tl = "es"
+        tld = PERSONAS[persona]["tld"] if tl in ("es", "en") else "com"
+        gTTS(text=reply, lang=tl, tld=tld, slow=False).save(str(AUDIO_DIR / name))
+        audio_url = f"/api/audio/{name}"
     except Exception:
-        raise HTTPException(500, "Error al generar el audio")
-    return ChatResponse(response_text=reply, audio_url=f"/api/audio/{name}", session_id=sid, persona=persona, idioma=idioma, emotion=emotion, status="success")
+        audio_url = None  # un fallo de voz nunca tumba la respuesta de texto
+    return ChatResponse(response_text=reply, audio_url=audio_url, session_id=sid, persona=persona, idioma=idioma, emotion=emotion, status="success")
 
 @app.get("/api/personas")
 async def personas():
